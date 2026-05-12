@@ -70,7 +70,8 @@ impl DocArgs {
         let config = self.config()?;
         let root = &config.root;
         let project = config.project()?;
-        let compiler = ProjectCompiler::new().quiet(true);
+        let compiler =
+            ProjectCompiler::new().quiet(true).dynamic_test_linking(config.dynamic_test_linking);
         let mut output = compiler.compile(&project)?;
         let compiler = output.parser_mut().solc_mut().compiler_mut();
 

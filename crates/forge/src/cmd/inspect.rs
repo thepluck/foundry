@@ -3,7 +3,10 @@ use alloy_primitives::{hex, keccak256};
 use clap::Parser;
 use comfy_table::{Cell, Table, modifiers::UTF8_ROUND_CORNERS, presets::ASCII_MARKDOWN};
 use eyre::{Result, eyre};
-use foundry_cli::opts::{BuildOpts, CompilerOpts};
+use foundry_cli::{
+    opts::{BuildOpts, CompilerOpts},
+    utils::LoadConfig,
+};
 use foundry_common::{
     compile::{PathOrContractInfo, ProjectCompiler},
     find_matching_contract_artifact, find_target_path, shell,
@@ -78,6 +81,7 @@ impl InspectArgs {
         };
 
         // Build the project
+        let config = modified_build_args.load_config()?;
         let project = modified_build_args.project()?;
         let target_path = find_target_path(&project, &contract)?;
         if field == ContractArtifactField::Linearization && !is_solidity_source(&target_path) {
@@ -85,7 +89,8 @@ impl InspectArgs {
                 "linearization inspection is only supported for Solidity contracts (.sol targets)"
             );
         }
-        let compiler = ProjectCompiler::new().quiet(true);
+        let compiler =
+            ProjectCompiler::new().quiet(true).dynamic_test_linking(config.dynamic_test_linking);
         let mut output = compiler.files([target_path.clone()]).compile(&project)?;
 
         // Find the artifact

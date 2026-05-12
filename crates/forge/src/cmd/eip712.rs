@@ -49,7 +49,10 @@ impl Eip712Args {
     pub fn run(self) -> Result<()> {
         let config = self.build.load_config()?;
         let project = config.solar_project()?;
-        let mut output = ProjectCompiler::new().files([self.target_path]).compile(&project)?;
+        let mut output = ProjectCompiler::new()
+            .files([self.target_path])
+            .dynamic_test_linking(config.dynamic_test_linking)
+            .compile(&project)?;
         let compiler = output.parser_mut().solc_mut().compiler_mut();
         compiler.enter_mut(|compiler| -> Result<()> {
             let Ok(ControlFlow::Continue(())) = compiler.lower_asts() else { return Ok(()) };

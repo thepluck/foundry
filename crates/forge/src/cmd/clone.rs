@@ -640,7 +640,7 @@ pub fn compile_project(root: &Path) -> Result<ProjectCompileOutput> {
     let mut config = Config::load_with_root(root)?.sanitized();
     config.extra_output.push(ContractOutputSelection::StorageLayout);
     let project = config.project()?;
-    let compiler = ProjectCompiler::new();
+    let compiler = ProjectCompiler::new().dynamic_test_linking(config.dynamic_test_linking);
     compiler.compile(&project)
 }
 

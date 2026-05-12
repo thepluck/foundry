@@ -107,7 +107,10 @@ impl LintArgs {
             .with_severity(if severity.is_empty() { None } else { Some(severity) })
             .with_lint_specific(&config.lint.lint_specific);
 
-        let output = ProjectCompiler::new().files(input.iter().cloned()).compile(&project)?;
+        let output = ProjectCompiler::new()
+            .files(input.iter().cloned())
+            .dynamic_test_linking(config.dynamic_test_linking)
+            .compile(&project)?;
         let solar_sources =
             get_solar_sources_from_compile_output(&config, &output, Some(&input), Some(&ignored))?;
         if solar_sources.input.sources.is_empty() {

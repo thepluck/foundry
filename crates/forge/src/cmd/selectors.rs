@@ -4,7 +4,7 @@ use comfy_table::{Table, modifiers::UTF8_ROUND_CORNERS, presets::ASCII_MARKDOWN}
 use eyre::Result;
 use foundry_cli::{
     opts::{BuildOpts, CompilerOpts, ProjectPathOpts},
-    utils::{FoundryPathExt, cache_local_signatures, cache_signatures_from_abis},
+    utils::{FoundryPathExt, LoadConfig, cache_local_signatures, cache_signatures_from_abis},
 };
 use foundry_common::{
     compile::{PathOrContractInfo, ProjectCompiler, compile_target},
@@ -103,8 +103,12 @@ impl SelectorsSubcommands {
                 };
 
                 // compile the project to get the artifacts/abis
+                let config = build_args.load_config()?;
                 let project = build_args.project()?;
-                let outcome = ProjectCompiler::new().quiet(true).compile(&project)?;
+                let outcome = ProjectCompiler::new()
+                    .quiet(true)
+                    .dynamic_test_linking(config.dynamic_test_linking)
+                    .compile(&project)?;
                 cache_local_signatures(&outcome)?;
             }
             Self::Upload { contract, all, project_paths } => {
@@ -117,6 +121,7 @@ impl SelectorsSubcommands {
                     ..Default::default()
                 };
 
+                let config = build_args.load_config()?;
                 let project = build_args.project()?;
                 let output = if let Some(contract_info) = &contract {
                     let Some(contract_name) = contract_info.name() else {
@@ -129,7 +134,9 @@ impl SelectorsSubcommands {
                         .unwrap_or_else(|| project.find_contract_path(contract_name))?;
                     compile_target(&target_path, &project, false)?
                 } else {
-                    ProjectCompiler::new().compile(&project)?
+                    ProjectCompiler::new()
+                        .dynamic_test_linking(config.dynamic_test_linking)
+                        .compile(&project)?
                 };
                 let artifacts = if all {
                     output
@@ -181,8 +188,11 @@ impl SelectorsSubcommands {
             }
             Self::Collision { mut first_contract, mut second_contract, build } => {
                 // Compile the project with the two contracts included
+                let config = build.load_config()?;
                 let project = build.project()?;
-                let mut compiler = ProjectCompiler::new().quiet(true);
+                let mut compiler = ProjectCompiler::new()
+                    .quiet(true)
+                    .dynamic_test_linking(config.dynamic_test_linking);
 
                 if let Some(contract_path) = &mut first_contract.path {
                     let target_path = canonicalize(&*contract_path)?;
@@ -252,8 +262,12 @@ impl SelectorsSubcommands {
                 };
 
                 // compile the project to get the artifacts/abis
+                let config = build_args.load_config()?;
                 let project = build_args.project()?;
-                let outcome = ProjectCompiler::new().quiet(true).compile(&project)?;
+                let outcome = ProjectCompiler::new()
+                    .quiet(true)
+                    .dynamic_test_linking(config.dynamic_test_linking)
+                    .compile(&project)?;
                 let artifacts = if let Some(contract) = contract {
                     let found_artifact = outcome.find_first(&contract);
                     let artifact = found_artifact
@@ -396,8 +410,12 @@ impl SelectorsSubcommands {
                     ..Default::default()
                 };
 
+                let config = build_args.load_config()?;
                 let project = build_args.project()?;
-                let outcome = ProjectCompiler::new().quiet(true).compile(&project)?;
+                let outcome = ProjectCompiler::new()
+                    .quiet(true)
+                    .dynamic_test_linking(config.dynamic_test_linking)
+                    .compile(&project)?;
                 let artifacts = outcome
                     .into_artifacts_with_files()
                     .filter(|(file, _, _)| {
