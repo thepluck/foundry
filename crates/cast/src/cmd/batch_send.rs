@@ -95,7 +95,7 @@ impl BatchSendArgs {
             );
         }
 
-        sh_println!("Building batch transaction with {} call(s)...", tempo_calls.len())?;
+        sh_status!("Building batch transaction with {} call(s)...", tempo_calls.len())?;
 
         // Preserve key_id for modes that do not call build_with_access_key, such as unlocked.
         if let Some(ref access_key) = tempo_access_key {

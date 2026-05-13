@@ -66,7 +66,7 @@ pub(super) fn run(
         rng.fill_bytes(&mut salt[..]);
     }
 
-    sh_println!("Mining TIP-1022 salt for {master} with {n_threads} threads...")?;
+    sh_status!("Mining TIP-1022 salt for {master} with {n_threads} threads...")?;
 
     let timer = Instant::now();
     let output = mine(master, salt, n_threads, POW_BYTES)?;
@@ -105,7 +105,7 @@ pub(super) async fn register(
         .into_transaction_request();
     tx_opts.apply::<TempoNetwork>(&mut tx, get_chain(config.chain, &provider).await?.is_legacy());
 
-    sh_println!("Submitting registerVirtualMaster({salt}) on Tempo...")?;
+    sh_status!("Submitting registerVirtualMaster({salt}) on Tempo...")?;
 
     if let Some(ref access_key) = tempo_access_key {
         cast_send_with_access_key(
@@ -175,7 +175,7 @@ fn print_output(output: &Output, elapsed: Option<Duration>) -> Result<()> {
         String::new()
     };
 
-    sh_println!(
+    sh_status!(
         r#"{header}Salt:              {}
 Registration hash: {}
 Master ID:         {}
@@ -185,6 +185,7 @@ Zero-tag address:  {}"#,
         output.master_id,
         output.zero_tag_virtual_address,
     )?;
+    sh_println!("{}", output.salt)?;
     Ok(())
 }
 
