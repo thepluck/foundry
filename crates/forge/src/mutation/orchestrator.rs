@@ -19,9 +19,12 @@ use foundry_compilers::{
 use foundry_config::{Config, filter::GlobMatcher};
 use foundry_evm::opts::EvmOpts;
 
-use crate::mutation::{
-    MutationHandler, MutationProgress, MutationReporter, MutationsSummary, mutant::MutationResult,
-    runner::run_mutations_parallel_with_progress,
+use crate::{
+    cmd::test::FilterArgs,
+    mutation::{
+        MutationHandler, MutationProgress, MutationReporter, MutationsSummary,
+        mutant::MutationResult, runner::run_mutations_parallel_with_progress,
+    },
 };
 
 /// Configuration for mutation testing run.
@@ -38,6 +41,13 @@ pub struct MutationRunConfig {
     pub show_progress: bool,
     /// Whether to output JSON (suppress all other output).
     pub json_output: bool,
+    /// Test filter (`--match-test`, `--match-contract`, `--match-path`, ...)
+    /// applied identically to baseline and every mutant run so they exercise
+    /// the same test set.
+    pub filter_args: FilterArgs,
+    /// EVM isolation flag — mirrors the canonical `forge test` runner so
+    /// baseline and mutant runs use the same execution model.
+    pub isolate: bool,
 }
 
 impl MutationRunConfig {
@@ -78,6 +88,13 @@ pub async fn run_mutation_testing(
     let num_workers = mutation_config.effective_workers();
     let json_output = mutation_config.json_output;
 
+    // Compute a single digest of execution-affecting inputs (test filter,
+    // isolation, fork URL/block, sender, ...) that aren't covered by the
+    // source/build hash. Folded into every per-file cache key below so a
+    // re-run with different `--match-test`, `--isolate`, or fork settings
+    // does not silently reuse stale mutant outcomes from a previous run.
+    let runtime_context_digest = runtime_context_digest(&mutation_config, &evm_opts);
+
     // Determine which paths to mutate
     let mutate_paths = resolve_mutate_paths(&config, output, &mutation_config)?;
 
@@ -96,7 +113,8 @@ pub async fn run_mutation_testing(
 
         // Create handler for this file, optionally restricting to a subset of
         // contracts by name when --mutate-contract is provided.
-        let mut handler = MutationHandler::new(path.clone(), config.clone());
+        let mut handler = MutationHandler::new(path.clone(), config.clone())
+            .with_runtime_context_digest(runtime_context_digest);
         if let Some(filter) = &mutation_config.mutate_contract_pattern {
             handler = handler.with_contract_filter(filter.clone());
         }
@@ -177,6 +195,8 @@ pub async fn run_mutation_testing(
             num_workers,
             progress.clone(),
             json_output,
+            mutation_config.filter_args.clone(),
+            mutation_config.isolate,
         )?;
 
         // Collect results for caching
@@ -235,6 +255,45 @@ pub async fn run_mutation_testing(
     }
 
     Ok(MutationRunResult { summary: mutation_summary, cancelled, duration_secs })
+}
+
+/// Build a single digest of inputs that affect mutant pass/fail outcomes but
+/// are not already covered by the source / build hash. Cache entries should
+/// be invalidated when any of these change.
+///
+/// Inputs folded in:
+/// - test filter (`--match-test`, `--no-match-test`, `--match-contract`, `--no-match-contract`,
+///   `--match-path`, `--no-match-path`)
+/// - `--isolate`
+/// - fork URL and pinned block (a different fork can flip a mutant's outcome)
+/// - `sender`, `initial_balance` (affect test setup)
+fn runtime_context_digest(mutation_config: &MutationRunConfig, evm_opts: &EvmOpts) -> u64 {
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
+
+    let mut h = DefaultHasher::new();
+
+    // Test filter
+    let f = &mutation_config.filter_args;
+    f.test_pattern.as_ref().map(|r| r.as_str()).hash(&mut h);
+    f.test_pattern_inverse.as_ref().map(|r| r.as_str()).hash(&mut h);
+    f.contract_pattern.as_ref().map(|r| r.as_str()).hash(&mut h);
+    f.contract_pattern_inverse.as_ref().map(|r| r.as_str()).hash(&mut h);
+    f.path_pattern.as_ref().map(|g| g.as_str()).hash(&mut h);
+    f.path_pattern_inverse.as_ref().map(|g| g.as_str()).hash(&mut h);
+
+    // Execution model
+    mutation_config.isolate.hash(&mut h);
+
+    // Fork / EVM-side knobs that change test outcomes
+    evm_opts.fork_url.hash(&mut h);
+    evm_opts.fork_block_number.hash(&mut h);
+    evm_opts.sender.hash(&mut h);
+    evm_opts.initial_balance.to_be_bytes::<32>().hash(&mut h);
+
+    h.finish()
 }
 
 /// Resolve which paths to mutate based on configuration.

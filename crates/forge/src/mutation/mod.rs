@@ -263,6 +263,12 @@ pub struct MutationHandler {
     /// Optional regex used to restrict mutation to specific contracts within
     /// the file (matches against contract name).
     contract_filter: Option<regex::Regex>,
+    /// Digest of execution-affecting inputs that aren't part of the source /
+    /// build hash but still change a mutant's pass/fail outcome. Folded into
+    /// the cache key so e.g. a different `--match-test`, a different
+    /// `--isolate`, or a different fork URL/block do not silently reuse stale
+    /// cached results. `0` means "no extra runtime context" (back-compat).
+    runtime_context_digest: u64,
 }
 
 impl MutationHandler {
@@ -275,12 +281,21 @@ impl MutationHandler {
             report: MutationsSummary::new(),
             survived_spans: SurvivedSpans::new(),
             contract_filter: None,
+            runtime_context_digest: 0,
         }
     }
 
     /// Restrict mutation to contracts whose name matches `filter`.
     pub fn with_contract_filter(mut self, filter: regex::Regex) -> Self {
         self.contract_filter = Some(filter);
+        self
+    }
+
+    /// Bind a precomputed digest of execution-affecting inputs (test filter,
+    /// `--isolate`, fork settings, ...) so cached mutant results are
+    /// invalidated when those inputs change.
+    pub const fn with_runtime_context_digest(mut self, digest: u64) -> Self {
+        self.runtime_context_digest = digest;
         self
     }
 
@@ -357,6 +372,13 @@ impl MutationHandler {
             }
             None => "nofilter".hash(&mut cfg_hasher),
         }
+        // Fold in the runtime context digest (test filter, isolation, fork
+        // URL/block, ...) so cached results are not reused when the user
+        // re-runs with different `--match-test`, `--isolate`, or fork
+        // settings — those change which tests are exercised / how they
+        // execute and therefore can flip a mutant from Alive to Dead (or
+        // vice versa). Without this the cache is a latent correctness bug.
+        self.runtime_context_digest.hash(&mut cfg_hasher);
         let cfg_hash = cfg_hasher.finish();
 
         let stem =
