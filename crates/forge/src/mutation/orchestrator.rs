@@ -144,9 +144,19 @@ pub async fn run_mutation_testing(
             continue;
         }
 
+        // Load persisted survived spans *before* generating/loading mutants so
+        // they can actually steer the adaptive skip — both at AST generation
+        // time (via the span filter inside `generate_ast`) and when re-using
+        // a cached mutant list from a prior partial run.
+        handler.retrieve_survived_spans(&build_id);
+
         // Generate or load cached mutants
         let mut mutants = if let Some(ms) = handler.retrieve_cached_mutants(&build_id) {
-            ms
+            // When loading from cache, filter out mutants whose span already
+            // had a survivor in a previous run. Without this, a resumed run
+            // would re-test mutations the adaptive heuristic already knows
+            // are uninformative.
+            ms.into_iter().filter(|m| !handler.should_skip_span(m.span)).collect()
         } else {
             handler.generate_ast(json_output).await?;
             handler.mutations.clone()
@@ -158,11 +168,6 @@ pub async fn run_mutation_testing(
             }
             continue;
         }
-
-        // Load survived spans for adaptive mutation testing. Only loaded after
-        // we successfully obtained mutants for this build, so a stale survived
-        // cache from a different mutant set is not applied.
-        handler.retrieve_survived_spans(&build_id);
 
         // Sort mutations by span for optimal adaptive testing
         mutants.sort_by(|a, b| {
@@ -228,6 +233,14 @@ pub async fn run_mutation_testing(
         //   - non-cancelled-but-short result vectors indicate a bug, not a hit
         // The mutants list itself is fine to persist (it's deterministic from
         // the AST + operator set) and so are survived spans (best-effort hint).
+        //
+        // Sort the persisted result vector by mutant span so the on-disk
+        // cache is independent of rayon worker completion order; otherwise
+        // the cache file changes content-hash run-to-run even when the
+        // outcomes are identical, defeating diffing and reproducibility.
+        results_vec.sort_by(|(a, _), (b, _)| {
+            a.span.lo().0.cmp(&b.span.lo().0).then_with(|| a.span.hi().0.cmp(&b.span.hi().0))
+        });
         if !mutants.is_empty() && !build_id.is_empty() {
             let _ = handler.persist_cached_mutants(&build_id, &mutants);
             if complete_run {
@@ -265,8 +278,11 @@ pub async fn run_mutation_testing(
 /// - test filter (`--match-test`, `--no-match-test`, `--match-contract`, `--no-match-contract`,
 ///   `--match-path`, `--no-match-path`)
 /// - `--isolate`
-/// - fork URL and pinned block (a different fork can flip a mutant's outcome)
-/// - `sender`, `initial_balance` (affect test setup)
+/// - the entire `EvmOpts` serialized as JSON. This is intentionally broad: `EvmOpts` carries fork
+///   URL/block, networks, env (chain_id, block, timestamp, basefee), gas-limit toggles, sender,
+///   initial balance, and other knobs that can each individually flip a mutant from `Alive` to
+///   `Dead`. Hashing the whole serialized blob trades occasional conservative invalidations for not
+///   having to keep a hand-picked field list in lock-step with `EvmOpts`.
 fn runtime_context_digest(mutation_config: &MutationRunConfig, evm_opts: &EvmOpts) -> u64 {
     use std::{
         collections::hash_map::DefaultHasher,
@@ -287,45 +303,38 @@ fn runtime_context_digest(mutation_config: &MutationRunConfig, evm_opts: &EvmOpt
     // Execution model
     mutation_config.isolate.hash(&mut h);
 
-    // Fork / EVM-side knobs that change test outcomes
-    evm_opts.fork_url.hash(&mut h);
-    evm_opts.fork_block_number.hash(&mut h);
-    evm_opts.sender.hash(&mut h);
-    evm_opts.initial_balance.to_be_bytes::<32>().hash(&mut h);
+    // Fold in the full serialized `EvmOpts`. A serde failure here is harmless:
+    // we just omit it from the hash — callers compare digests by equality so
+    // mismatches still invalidate, and a fixed failure mode is preferable to
+    // panicking inside the orchestrator.
+    if let Ok(blob) = serde_json::to_vec(evm_opts) {
+        blob.hash(&mut h);
+    }
 
     h.finish()
 }
 
 /// Resolve which paths to mutate based on configuration.
+///
+/// Resolution order:
+/// 1. Pick the *base* set of candidate files:
+///    - `--mutate-path <GLOB>` → all source files matching the glob, OR
+///    - explicit `--mutate PATH...` → those validated files, OR
+///    - default → every Solidity file under `config.src`.
+/// 2. If `--mutate-contract <REGEX>` is set, intersect the base set with files that contain at
+///    least one contract whose name matches the regex. The per-file contract filter still
+///    re-applies inside the handler.
 fn resolve_mutate_paths(
     config: &Config,
     output: &ProjectCompileOutput<MultiCompiler>,
     mutation_config: &MutationRunConfig,
 ) -> Result<Vec<PathBuf>> {
-    let paths = if let Some(pattern) = &mutation_config.mutate_path_pattern {
-        // If --mutate-path is provided, use it to filter paths
+    // 1. Base path set.
+    let base: Vec<PathBuf> = if let Some(pattern) = &mutation_config.mutate_path_pattern {
         source_files_iter(&config.src, MultiCompilerLanguage::FILE_EXTENSIONS)
             .filter(|entry| entry.is_sol() && !entry.is_sol_test() && pattern.is_match(entry))
             .collect()
-    } else if let Some(contract_pattern) = &mutation_config.mutate_contract_pattern {
-        // If --mutate-contract is provided, use it to filter contracts
-        source_files_iter(&config.src, MultiCompilerLanguage::FILE_EXTENSIONS)
-            .filter(|entry| {
-                entry.is_sol()
-                    && !entry.is_sol_test()
-                    && output
-                        .artifact_ids()
-                        .filter(|(id, _)| id.source == *entry)
-                        .any(|(id, _)| contract_pattern.is_match(&id.name))
-            })
-            .collect()
-    } else if mutation_config.mutate_paths.is_empty() {
-        // If --mutate is passed without arguments, use all Solidity files
-        source_files_iter(&config.src, MultiCompilerLanguage::FILE_EXTENSIONS)
-            .filter(|entry| entry.is_sol() && !entry.is_sol_test())
-            .collect()
-    } else {
-        // If --mutate is passed with arguments, validate and use those paths
+    } else if !mutation_config.mutate_paths.is_empty() {
         let root_canon =
             config.root.canonicalize().wrap_err("failed to canonicalize project root")?;
         let mut validated = Vec::with_capacity(mutation_config.mutate_paths.len());
@@ -355,6 +364,26 @@ fn resolve_mutate_paths(
             validated.push(canon);
         }
         validated
+    } else {
+        source_files_iter(&config.src, MultiCompilerLanguage::FILE_EXTENSIONS)
+            .filter(|entry| entry.is_sol() && !entry.is_sol_test())
+            .collect()
+    };
+
+    // 2. Intersect with `--mutate-contract` if set, so explicit `--mutate <paths>` combined with
+    //    `--mutate-contract <regex>` does the principled thing (the listed files, restricted to
+    //    those containing a matching contract) instead of silently expanding to every source file.
+    let paths = if let Some(contract_pattern) = &mutation_config.mutate_contract_pattern {
+        base.into_iter()
+            .filter(|entry| {
+                output
+                    .artifact_ids()
+                    .filter(|(id, _)| id.source == *entry)
+                    .any(|(id, _)| contract_pattern.is_match(&id.name))
+            })
+            .collect()
+    } else {
+        base
     };
 
     Ok(paths)
