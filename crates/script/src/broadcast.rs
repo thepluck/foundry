@@ -733,7 +733,8 @@ impl<FEN: FoundryEvmNetwork> BundledState<FEN> {
     pub async fn verify_preflight_check(&self) -> Result<()> {
         for sequence in self.sequence.sequences() {
             let chain: Chain = sequence.chain.into();
-            // Resolve the API key: CLI arg first, then config (with fallback for unsupported chains).
+            // Resolve the API key: CLI arg first, then config (with fallback for unsupported
+            // chains).
             let etherscan_key = self
                 .script_config
                 .config
