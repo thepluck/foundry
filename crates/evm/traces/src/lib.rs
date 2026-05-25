@@ -196,6 +196,14 @@ pub fn prune_trace_depth(arena: &mut CallTraceArena, depth: usize) {
     }
 }
 
+/// Removes opcode-level trace steps from an arena before serializing it.
+pub fn strip_trace_steps(arena: &mut CallTraceArena) {
+    for node in arena.nodes_mut() {
+        node.trace.steps.clear();
+        node.ordering.retain(|item| !matches!(item, TraceMemberOrder::Step(_)));
+    }
+}
+
 /// Render a collection of call traces to a string optionally including contract creation bytecodes
 /// and in JSON format.
 pub fn render_trace_arena_inner(
