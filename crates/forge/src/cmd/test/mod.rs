@@ -668,7 +668,35 @@ impl TestArgs {
 
         // Run tests in a non-streaming fashion and collect results for serialization.
         if !self.gas_report && !self.summary && shell::is_json() {
+            let remote_chain = if self.decode_internal && runner.fork.is_some() {
+                runner.tx_env.chain_id().map(Into::into)
+            } else {
+                None
+            };
             let mut results = runner.test_collect(filter)?;
+            let known_contracts = runner.known_contracts.clone();
+            let libraries = runner.libraries.clone();
+            let mut trace_decoder = if self.decode_internal {
+                let mut identifier = TraceIdentifiers::new().with_local(&known_contracts);
+                if remote_chain.is_some() {
+                    identifier = identifier.with_external(&config, remote_chain)?;
+                }
+
+                let sources =
+                    ContractSources::from_project_output(output, &config.root, Some(&libraries))?;
+                let decoder = CallTraceDecoderBuilder::new()
+                    .with_known_contracts(&known_contracts)
+                    .with_label_disabled(self.disable_labels)
+                    .with_verbosity(verbosity)
+                    .with_chain_id(remote_chain.map(|c| c.id()))
+                    .with_signature_identifier(SignaturesIdentifier::from_config(&config)?)
+                    .with_debug_identifier(DebugTraceIdentifier::new(sources))
+                    .build();
+
+                Some((decoder, identifier))
+            } else {
+                None
+            };
             for suite_result in results.values_mut() {
                 for test_result in suite_result.test_results.values_mut() {
                     if verbosity >= 2 {
@@ -678,11 +706,29 @@ impl TestArgs {
                         // Empty logs for non verbose runs.
                         test_result.logs = vec![];
                     }
+
+                    if let Some((decoder, identifier)) = &mut trace_decoder {
+                        decoder.clear_addresses();
+                        decoder
+                            .labels
+                            .extend(test_result.labels.iter().map(|(k, v)| (*k, v.clone())));
+                        for (_, arena) in &mut test_result.traces {
+                            decoder.identify(arena, identifier);
+                            decode_trace_arena(arena, decoder).await;
+                            if let Some(trace_depth) = self.trace_depth {
+                                prune_trace_depth(arena, trace_depth);
+                            }
+                        }
+                    }
                 }
             }
             sh_println!("{}", serde_json::to_string(&results)?)?;
-            let kc = runner.known_contracts.clone();
-            return Ok(TestOutcome::new(Some(kc), results, self.allow_failure, fuzz_seed));
+            return Ok(TestOutcome::new(
+                Some(known_contracts),
+                results,
+                self.allow_failure,
+                fuzz_seed,
+            ));
         }
 
         if self.junit {
